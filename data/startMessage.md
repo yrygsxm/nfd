@@ -1,7 +1,5 @@
-Bot Created Via [NFD](https://github.com/LloydAsp/nfd)
+本Bot为APPDO数字生活指南、浮生东京、APPDO的互联网记忆的专用机器人，使用开源项目NFD搭建，感谢开发者。
 
-使用方法：
+本Bot使用方法： 当你给本bot发消息，会被转发到以上频道的创建者。
 
-- 当其他用户给bot发消息，会被转发到bot创建者
-- 用户回复普通文字给转发的消息时，会回复到原消息发送者
-- 用户回复 `/block` ,  `/unblock` ,  `/checkblock` 等命令会执行相关指令， **不会** 回复到原消息发送者
+https://t.me/AppDoDo/
