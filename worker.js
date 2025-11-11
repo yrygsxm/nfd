@@ -4,11 +4,13 @@ const SECRET = ENV_BOT_SECRET // A-Z, a-z, 0-9, _ and -
 const ADMIN_UID = ENV_ADMIN_UID // your user id, get it from https://t.me/username_to_id_bot
 
 const NOTIFY_INTERVAL = 3600 * 1000;
+const VERIFICATION_TIMEOUT = 300 * 1000; // 5分钟验证超时
 const fraudDb = 'https://raw.githubusercontent.com/LloydAsp/nfd/main/data/fraud.db';
 const notificationUrl = 'https://raw.githubusercontent.com/LloydAsp/nfd/main/data/notification.txt'
 const startMsgUrl = 'https://raw.githubusercontent.com/LloydAsp/nfd/main/data/startMessage.md';
 
 const enable_notification = true
+
 /**
  * Return url to telegram api, optionally with parameters added
  */
@@ -45,6 +47,76 @@ function copyMessage(msg = {}){
 
 function forwardMessage(msg){
   return requestTelegram('forwardMessage', makeReqBody(msg))
+}
+
+function editMessageReplyMarkup(msg = {}){
+  return requestTelegram('editMessageReplyMarkup', makeReqBody(msg))
+}
+
+function answerCallbackQuery(msg = {}){
+  return requestTelegram('answerCallbackQuery', makeReqBody(msg))
+}
+
+/**
+ * 生成随机数学问题
+ */
+function generateMathProblem(){
+  const operations = ['+', '-'];
+  const operation = operations[Math.floor(Math.random() * operations.length)];
+  
+  let num1, num2, answer;
+  
+  if(operation === '+'){
+    num1 = Math.floor(Math.random() * 50) + 1; // 1-50
+    num2 = Math.floor(Math.random() * 50) + 1; // 1-50
+    answer = num1 + num2;
+  } else { // '-'
+    num1 = Math.floor(Math.random() * 50) + 20; // 20-69
+    num2 = Math.floor(Math.random() * (num1 - 1)) + 1; // 1 到 num1-1，确保结果为正
+    answer = num1 - num2;
+  }
+  
+  return {
+    question: `${num1} ${operation} ${num2}`,
+    answer: answer
+  };
+}
+
+/**
+ * 生成验证按钮
+ */
+function generateVerificationButtons(correctAnswer){
+  // 生成3个错误答案
+  const wrongAnswers = new Set();
+  while(wrongAnswers.size < 3){
+    let wrong = correctAnswer + Math.floor(Math.random() * 20) - 10; // ±10范围内的错误答案
+    if(wrong !== correctAnswer && wrong > 0){
+      wrongAnswers.add(wrong);
+    }
+  }
+  
+  // 组合所有答案并打乱
+  const allAnswers = [correctAnswer, ...Array.from(wrongAnswers)];
+  allAnswers.sort(() => Math.random() - 0.5);
+  
+  // 创建两行按钮，每行2个
+  const buttons = [];
+  for(let i = 0; i < allAnswers.length; i += 2){
+    const row = [];
+    row.push({
+      text: allAnswers[i].toString(),
+      callback_data: `verify_${allAnswers[i]}`
+    });
+    if(i + 1 < allAnswers.length){
+      row.push({
+        text: allAnswers[i + 1].toString(),
+        callback_data: `verify_${allAnswers[i + 1]}`
+      });
+    }
+    buttons.push(row);
+  }
+  
+  return buttons;
 }
 
 /**
@@ -88,6 +160,107 @@ async function handleWebhook (event) {
 async function onUpdate (update) {
   if ('message' in update) {
     await onMessage(update.message)
+  } else if ('callback_query' in update) {
+    await onCallbackQuery(update.callback_query)
+  }
+}
+
+/**
+ * 处理回调查询（按钮点击）
+ */
+async function onCallbackQuery(callbackQuery){
+  const chatId = callbackQuery.message.chat.id;
+  const messageId = callbackQuery.message.message_id;
+  const data = callbackQuery.data;
+  
+  // 处理验证回调
+  if(data.startsWith('verify_')){
+    const userAnswer = parseInt(data.replace('verify_', ''));
+    const verificationData = await nfd.get('verification-' + chatId, { type: "json" });
+    
+    if(!verificationData){
+      return answerCallbackQuery({
+        callback_query_id: callbackQuery.id,
+        text: '验证已过期，请重新发送消息',
+        show_alert: true
+      });
+    }
+    
+    // 检查是否超时
+    if(Date.now() - verificationData.timestamp > VERIFICATION_TIMEOUT){
+      await nfd.delete('verification-' + chatId);
+      await editMessageReplyMarkup({
+        chat_id: chatId,
+        message_id: messageId,
+        reply_markup: { inline_keyboard: [] }
+      });
+      return answerCallbackQuery({
+        callback_query_id: callbackQuery.id,
+        text: '验证已超时，请重新发送消息',
+        show_alert: true
+      });
+    }
+    
+    // 验证答案
+    if(userAnswer === verificationData.answer){
+      // 验证成功
+      await nfd.put('verified-' + chatId, true, { expirationTtl: 86400 }); // 24小时有效
+      await nfd.delete('verification-' + chatId);
+      
+      // 移除按钮
+      await editMessageReplyMarkup({
+        chat_id: chatId,
+        message_id: messageId,
+        reply_markup: { inline_keyboard: [] }
+      });
+      
+      // 发送成功消息
+      await answerCallbackQuery({
+        callback_query_id: callbackQuery.id,
+        text: '✅ 验证成功！现在可以发送消息了',
+        show_alert: false
+      });
+      
+      await sendMessage({
+        chat_id: chatId,
+        text: '✅ 验证成功！您现在可以正常发送消息了。'
+      });
+      
+      // 如果有待发送的消息，转发它
+      if(verificationData.pendingMessage){
+        await handleGuestMessage(verificationData.pendingMessage);
+      }
+    } else {
+      // 验证失败
+      await answerCallbackQuery({
+        callback_query_id: callbackQuery.id,
+        text: '❌ 答案错误，请重试',
+        show_alert: true
+      });
+      
+      // 生成新问题
+      const mathProblem = generateMathProblem();
+      const buttons = generateVerificationButtons(mathProblem.answer);
+      
+      await nfd.put('verification-' + chatId, {
+        answer: mathProblem.answer,
+        timestamp: Date.now(),
+        pendingMessage: verificationData.pendingMessage
+      });
+      
+      await editMessageReplyMarkup({
+        chat_id: chatId,
+        message_id: messageId,
+        reply_markup: {
+          inline_keyboard: buttons
+        }
+      });
+      
+      await sendMessage({
+        chat_id: chatId,
+        text: `❌ 答案错误！请重新计算：\n\n${mathProblem.question} = ?`
+      });
+    }
   }
 }
 
@@ -103,6 +276,8 @@ async function onMessage (message) {
       text:startMsg,
     })
   }
+  
+  // 管理员消息处理
   if(message.chat.id.toString() === ADMIN_UID){
     if(!message?.reply_to_message?.chat){
       return sendMessage({
@@ -127,7 +302,55 @@ async function onMessage (message) {
       message_id:message.message_id,
     })
   }
-  return handleGuestMessage(message)
+  
+  // 访客消息处理 - 添加验证检查
+  return handleGuestMessageWithVerification(message)
+}
+
+/**
+ * 处理访客消息（带验证检查）
+ */
+async function handleGuestMessageWithVerification(message){
+  let chatId = message.chat.id;
+  
+  // 检查是否已验证
+  let isVerified = await nfd.get('verified-' + chatId, { type: "json" });
+  
+  if(!isVerified){
+    // 检查是否有正在进行的验证
+    let verificationData = await nfd.get('verification-' + chatId, { type: "json" });
+    
+    if(verificationData){
+      // 已经发送了验证，提醒用户完成验证
+      return sendMessage({
+        chat_id: chatId,
+        text: '⚠️ 请先完成上面的数学验证，然后才能发送消息。'
+      });
+    }
+    
+    // 生成验证问题
+    const mathProblem = generateMathProblem();
+    const buttons = generateVerificationButtons(mathProblem.answer);
+    
+    // 保存验证数据和待发送的消息
+    await nfd.put('verification-' + chatId, {
+      answer: mathProblem.answer,
+      timestamp: Date.now(),
+      pendingMessage: message
+    });
+    
+    // 发送验证消息
+    return sendMessage({
+      chat_id: chatId,
+      text: `🔐 为了防止垃圾消息，请先完成以下数学验证：\n\n${mathProblem.question} = ?\n\n请点击正确答案：`,
+      reply_markup: {
+        inline_keyboard: buttons
+      }
+    });
+  }
+  
+  // 已验证，正常处理消息
+  return handleGuestMessage(message);
 }
 
 async function handleGuestMessage(message){
