@@ -10,6 +10,7 @@ const notificationUrl = 'https://raw.githubusercontent.com/LloydAsp/nfd/main/dat
 const startMsgUrl = 'https://raw.githubusercontent.com/LloydAsp/nfd/main/data/startMessage.md';
 
 const enable_notification = true
+const BLOCKED_KEYWORDS_KEY = 'blocked-keywords'
 
 /**
  * Return url to telegram api, optionally with parameters added
@@ -269,6 +270,7 @@ async function onCallbackQuery(callbackQuery){
  * https://core.telegram.org/bots/api#message
  */
 async function onMessage (message) {
+  const messageText = message.text ? message.text.trim() : ''
   if(message.text === '/start'){
     let startMsg = await fetch(startMsgUrl).then(r => r.text())
     return sendMessage({
@@ -279,20 +281,29 @@ async function onMessage (message) {
   
   // 管理员消息处理
   if(message.chat.id.toString() === ADMIN_UID){
+    if(/^\/block$/.exec(messageText)){
+      return handleBlock(message)
+    }
+    if(/^\/unblock$/.exec(messageText)){
+      return handleUnBlock(message)
+    }
+    if(/^\/checkblock$/.exec(messageText)){
+      return checkBlock(message)
+    }
+    if(/^\/addkeyword(\s+.+)?$/.exec(messageText)){
+      return addBlockedKeyword(messageText)
+    }
+    if(/^\/removekeyword(\s+.+)?$/.exec(messageText)){
+      return removeBlockedKeyword(messageText)
+    }
+    if(/^\/listkeywords$/.exec(messageText)){
+      return listBlockedKeywords()
+    }
     if(!message?.reply_to_message?.chat){
       return sendMessage({
         chat_id:ADMIN_UID,
-        text:'使用方法，回复转发的消息，并发送回复消息，或者`/block`、`/unblock`、`/checkblock`等指令'
+        text:'使用方法：回复转发消息后发送回复，或使用 `/block`、`/unblock`、`/checkblock`、`/addkeyword 关键词`、`/removekeyword 关键词`、`/listkeywords`'
       })
-    }
-    if(/^\/block$/.exec(message.text)){
-      return handleBlock(message)
-    }
-    if(/^\/unblock$/.exec(message.text)){
-      return handleUnBlock(message)
-    }
-    if(/^\/checkblock$/.exec(message.text)){
-      return checkBlock(message)
     }
     let guestChantId = await nfd.get('msg-map-' + message?.reply_to_message.message_id,
                                       { type: "json" })
@@ -363,6 +374,12 @@ async function handleGuestMessage(message){
       text:'Your are blocked'
     })
   }
+  if(await containsBlockedKeyword(message)){
+    return sendMessage({
+      chat_id: chatId,
+      text:'消息包含受限关键词，未发送成功'
+    })
+  }
 
   let forwardReq = await forwardMessage({
     chat_id:ADMIN_UID,
@@ -374,6 +391,90 @@ async function handleGuestMessage(message){
     await nfd.put('msg-map-' + forwardReq.result.message_id, chatId)
   }
   return handleNotify(message)
+}
+
+async function getBlockedKeywords(){
+  const keywords = await nfd.get(BLOCKED_KEYWORDS_KEY, { type: "json" });
+  if(Array.isArray(keywords)){
+    return keywords;
+  }
+  return [];
+}
+
+function normalizeKeyword(keyword = ''){
+  return keyword.trim().toLowerCase();
+}
+
+async function addBlockedKeyword(messageText){
+  const keyword = normalizeKeyword(messageText.replace('/addkeyword', ''));
+  if(!keyword){
+    return sendMessage({
+      chat_id: ADMIN_UID,
+      text: '请提供要新增的关键词，例如：/addkeyword 骗子'
+    });
+  }
+  const keywords = await getBlockedKeywords();
+  if(keywords.includes(keyword)){
+    return sendMessage({
+      chat_id: ADMIN_UID,
+      text: `关键词「${keyword}」已存在`
+    });
+  }
+  keywords.push(keyword);
+  await nfd.put(BLOCKED_KEYWORDS_KEY, JSON.stringify(keywords));
+  return sendMessage({
+    chat_id: ADMIN_UID,
+    text: `关键词「${keyword}」已添加`
+  });
+}
+
+async function removeBlockedKeyword(messageText){
+  const keyword = normalizeKeyword(messageText.replace('/removekeyword', ''));
+  if(!keyword){
+    return sendMessage({
+      chat_id: ADMIN_UID,
+      text: '请提供要删除的关键词，例如：/removekeyword 骗子'
+    });
+  }
+  const keywords = await getBlockedKeywords();
+  const filtered = keywords.filter(v => v !== keyword);
+  if(filtered.length === keywords.length){
+    return sendMessage({
+      chat_id: ADMIN_UID,
+      text: `关键词「${keyword}」不存在`
+    });
+  }
+  await nfd.put(BLOCKED_KEYWORDS_KEY, JSON.stringify(filtered));
+  return sendMessage({
+    chat_id: ADMIN_UID,
+    text: `关键词「${keyword}」已删除`
+  });
+}
+
+async function listBlockedKeywords(){
+  const keywords = await getBlockedKeywords();
+  if(keywords.length === 0){
+    return sendMessage({
+      chat_id: ADMIN_UID,
+      text: '当前没有屏蔽关键词'
+    });
+  }
+  return sendMessage({
+    chat_id: ADMIN_UID,
+    text: `当前屏蔽关键词：\n- ${keywords.join('\n- ')}`
+  });
+}
+
+async function containsBlockedKeyword(message){
+  const keywords = await getBlockedKeywords();
+  if(keywords.length === 0){
+    return false;
+  }
+  const content = `${message.text || ''}\n${message.caption || ''}`.toLowerCase();
+  if(!content.trim()){
+    return false;
+  }
+  return keywords.some(keyword => content.includes(keyword));
 }
 
 async function handleNotify(message){
